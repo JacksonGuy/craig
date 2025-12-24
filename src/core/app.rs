@@ -1,5 +1,6 @@
 use std::io;
 use std::time::{Instant, Duration};
+use std::error::Error;
 
 use ratatui::{
     crossterm::event::{self, Event, KeyCode, KeyEventKind},
@@ -12,6 +13,9 @@ use ratatui::{
     },
     DefaultTerminal, Frame,
 };
+use serde::{Serialize, Deserialize};
+use serde_json::Value;
+use ureq;
 
 use crate::core::cpu::CPUData;
 use crate::core::mem::MemData;
@@ -70,15 +74,37 @@ impl App {
             Constraint::Percentage(20),
             Constraint::Percentage(80),
         ]);
-        let top_split = Layout::horizontal([
-            Constraint::Percentage(70),
-            Constraint::Percentage(30),
-        ]);
 
         let [system_view, process_view] = vertical.areas(frame.area());
-        let [process_select, process_details] = horizontal.areas(process_view);
+        let [process_view, process_details] = horizontal.areas(process_view);
     
         frame.render_widget(self.cpu_chart(), system_view);
+
+        match self.server_player_list() {
+            _ => ()
+        }
+    }
+
+    fn server_player_list(&mut self) -> Result<(), Box<dyn Error>> {
+        let ips = [
+            "129.80.58.106:8080",
+            "129.80.58.106:8081",
+            "129.80.58.106:8082",
+        ];
+
+        let mut player_counts: Vec<u64> = Vec::new();
+        for ip in ips {
+            let response = ureq::get(
+                format!("https://api.mcstatus.io/v2/status/java/{ip}")
+            )
+            .call()?
+            .body_mut()
+            .read_json::<Value>()?;
+       
+            player_counts.push(response["players"]["online"].as_u64().unwrap());
+        }
+
+        Ok(())
     }
 
     fn cpu_chart(&mut self) -> BarChart {

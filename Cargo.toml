@@ -7,4 +7,7 @@ edition = "2024"
 crossterm = "0.29.0"
 psutil = "5.4.0"
 ratatui = "0.29.0"
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.147"
 size = "0.5.0"
+ureq = { version = "3.1.4", features = ["json"] }
