@@ -1,0 +1,6 @@
+1. CPU Usage for whole system
+2. RAM Usage for whole system
+3. CPU and RAM usage for individual process
+4. Select processes to monitor
+5. Get player count for minecraft servers
+6. Panel for limiting resources per process?  
