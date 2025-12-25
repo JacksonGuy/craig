@@ -5,10 +5,13 @@ use std::error::Error;
 use ratatui::{
     crossterm::event::{self, Event, KeyCode, KeyEventKind},
     layout::{Constraint, Layout, Direction},
-    style::{Style, Stylize, Color},
-    text::{Line},
+    style::{
+        Style, Stylize, Color, Modifier,
+        palette::tailwind::{BLUE, GREEN, SLATE},
+    },
+    text::Line,
     widgets::{
-        Block, List, Paragraph, ListItem,
+        Block, List, Paragraph, ListItem, ListState,
         Bar, BarChart, BarGroup,
     },
     DefaultTerminal, Frame,
@@ -24,6 +27,8 @@ pub struct App {
     cpu_data: CPUData,
     mem_data: MemData,
     should_exit: bool,
+    ips: [String; 3],
+    list_state: ListState,
 }
 
 impl App {
@@ -32,16 +37,23 @@ impl App {
             cpu_data: CPUData::new(),
             mem_data: MemData::new(),
             should_exit: false,
+            ips: [
+                String::from("129.80.58.106:8080"),
+                String::from("129.80.58.106:8081"),
+                String::from("129.80.58.106:8082"),
+            ],
+            list_state: ListState::default(),
         }
     }
 
     pub fn run(&mut self, mut terminal: DefaultTerminal) -> io::Result<()> {
         terminal.draw(|frame| self.render(frame))?;
+        self.list_state.select(Some(0));
 
         let mut last = Instant::now();
         while !self.should_exit {
             let time = last.elapsed();
-            if time >= Duration::from_millis(3000) {
+            if time >= Duration::from_millis(500) {
                 terminal.draw(|frame| self.render(frame))?;
                 last = Instant::now();
             }
@@ -54,8 +66,13 @@ impl App {
     fn handle_events(&mut self) -> io::Result<()> {
         if event::poll(Duration::from_millis(16))? {
             if let Event::Key(key) = event::read()? {
-                if key.kind == KeyEventKind::Press && key.code == KeyCode::Char('q') {
-                    self.should_exit = true;
+                if key.kind == KeyEventKind::Press {
+                    match key.code {
+                        KeyCode::Char('q') => self.should_exit = true,
+                        KeyCode::Up => self.list_state_previous(),
+                        KeyCode::Down => self.list_state_next(),
+                        _ => ()
+                    }
                 }
             }
         }
@@ -71,29 +88,73 @@ impl App {
             Constraint::Fill(1)
         ]);
         let horizontal = Layout::horizontal([
-            Constraint::Percentage(20),
-            Constraint::Percentage(80),
+            Constraint::Percentage(30),
+            Constraint::Percentage(70),
         ]);
 
         let [system_view, process_view] = vertical.areas(frame.area());
         let [process_view, process_details] = horizontal.areas(process_view);
     
-        frame.render_widget(self.cpu_chart(), system_view);
+        let mut state = self.list_state.clone();
 
-        match self.server_player_list() {
-            _ => ()
-        }
+        frame.render_widget(self.cpu_chart(), system_view);
+        //frame.render_widget(self.player_list(), process_view);
+        frame.render_stateful_widget(self.player_list(), process_view, &mut state);
     }
 
-    fn server_player_list(&mut self) -> Result<(), Box<dyn Error>> {
-        let ips = [
-            "129.80.58.106:8080",
-            "129.80.58.106:8081",
-            "129.80.58.106:8082",
-        ];
+    fn list_state_next(&mut self) {
+        let i = match self.list_state.selected() {
+            Some(i) => {
+                if i >= self.ips.len() - 1 {
+                    0
+                } else {
+                    i + 1
+                }
+            }
+            None => 0
+        };
+        self.list_state.select(Some(i));
+    }
 
+    fn list_state_previous(&mut self) {
+        let i = match self.list_state.selected() {
+            Some(i) => {
+                if i == 0 {
+                    self.ips.len() - 1
+                } else {
+                    i - 1
+                }
+            }
+            None => 0
+        };
+        self.list_state.select(Some(i));
+    }
+
+    fn player_list(&mut self) -> List {
+        let player_counts = match self.get_player_counts() {
+            Ok(vec) => vec,
+            _ => vec![0,0,0]
+        };
+
+        let mut list_items: Vec<ListItem> = Vec::new();
+        for i in 0..player_counts.len() {
+            let item: ListItem = ListItem::from(
+                format!("{} - {}", self.ips[i], player_counts[i])
+            );
+            list_items.push(item);
+        }
+        
+        let style: Style = Style::new().bg(SLATE.c800).add_modifier(Modifier::BOLD);
+        List::new(list_items)
+            .block(Block::bordered().title("Player Counts"))
+            .highlight_style(style)
+            .highlight_symbol(">> ")
+            .highlight_spacing(ratatui::widgets::HighlightSpacing::Always)
+    }
+
+    fn get_player_counts(&mut self) -> Result<Vec<u64>, Box<dyn Error>> {
         let mut player_counts: Vec<u64> = Vec::new();
-        for ip in ips {
+        for ip in &self.ips {
             let response = ureq::get(
                 format!("https://api.mcstatus.io/v2/status/java/{ip}")
             )
@@ -104,7 +165,30 @@ impl App {
             player_counts.push(response["players"]["online"].as_u64().unwrap());
         }
 
-        Ok(())
+        Ok(player_counts)
+    }
+
+    fn get_player_names(&mut self) -> Result<Vec<Vec<String>>, Box<dyn Error>> {
+        let mut player_names: Vec<Vec<String>> = Vec::new();
+        for ip in &self.ips {
+            let mut server_players: Vec<String> = Vec::new();
+
+            let response = ureq::get(
+                format!("https://api.mcstatus.io/v2/java/{ip}")
+            )
+            .call()?
+            .body_mut()
+            .read_json::<Value>()?;
+
+            if let Some(players) = response["players"]["list"].as_array() {
+                for player in players {
+                    server_players.push(player["name_clean"].to_string());
+                }
+            }
+            player_names.push(server_players);
+        }
+
+        Ok(player_names)
     }
 
     fn cpu_chart(&mut self) -> BarChart {
