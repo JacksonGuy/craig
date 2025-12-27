@@ -16,19 +16,47 @@ use ratatui::{
     },
     DefaultTerminal, Frame,
 };
-use serde::{Serialize, Deserialize};
-use serde_json::Value;
-use ureq;
 
 use crate::core::cpu::CPUData;
 use crate::core::mem::MemData;
+use crate::core::server::ServerState;
+
+struct SystemStats {
+    pub cpu_usages: Vec<f32>,
+    pub mem_usage: u64,
+    pub max_mem: u64,
+
+    cpu_data: CPUData,
+    mem_data: MemData,
+}
+
+impl SystemStats {
+    pub fn new() -> Self {
+        Self {
+            cpu_usages: Vec::new(),
+            mem_usage: 0,
+            max_mem: 0,
+            cpu_data: CPUData::new(),
+            mem_data: MemData::new(),
+        }
+    }
+
+    pub fn update(&mut self) {
+        self.cpu_usages = self.cpu_data.get_cpu_usage();
+    
+        self.mem_usage = self.mem_data.get_used();
+        self.max_mem = self.mem_data.get_total();
+    }
+}
 
 pub struct App {
     cpu_data: CPUData,
     mem_data: MemData,
     should_exit: bool,
     ips: [String; 3],
+    server_states: Vec<ServerState>,
     list_state: ListState,
+    system_stats: SystemStats,
 }
 
 impl App {
@@ -42,22 +70,47 @@ impl App {
                 String::from("129.80.58.106:8081"),
                 String::from("129.80.58.106:8082"),
             ],
+            server_states: Vec::new(),
             list_state: ListState::default(),
+            system_stats: SystemStats::new(),
         }
     }
 
     pub fn run(&mut self, mut terminal: DefaultTerminal) -> io::Result<()> {
+        // Create server states
+        for ip in &self.ips {
+            let state: ServerState = ServerState::new(&ip);
+            self.server_states.push(state);
+        }
+
+        // Get system info
+        self.system_stats.update();
+
+        // Initial Draw
         terminal.draw(|frame| self.render(frame))?;
         self.list_state.select(Some(0));
 
-        let mut last = Instant::now();
+        let mut system_update = Instant::now();
+        let mut state_timer = Instant::now();
         while !self.should_exit {
-            let time = last.elapsed();
-            if time >= Duration::from_millis(500) {
-                terminal.draw(|frame| self.render(frame))?;
-                last = Instant::now();
+            // Update Server Stats
+            if system_update.elapsed() >= Duration::from_millis(500) {
+                self.system_stats.update();
+                system_update = Instant::now();
+            }
+            
+            // Get server information
+            if state_timer.elapsed() >= Duration::from_millis(30000) {
+                for state in &mut self.server_states {
+                    match state.update() {
+                        Ok(_) => (),
+                        Err(_) => continue
+                    }
+                }
+                state_timer = Instant::now();
             }
 
+            terminal.draw(|frame| self.render(frame))?;
             self.handle_events()?;
         }
         Ok(())
@@ -77,29 +130,6 @@ impl App {
             }
         }
         Ok(())
-    }
-
-    fn render(&mut self, frame: &mut Frame) {
-        // Add one for RAM, 2 for top and bottom border
-        let count = self.cpu_data.cpu_count + 1 + 2;
-
-        let vertical = Layout::vertical([
-            Constraint::Length(count as u16),
-            Constraint::Fill(1)
-        ]);
-        let horizontal = Layout::horizontal([
-            Constraint::Percentage(30),
-            Constraint::Percentage(70),
-        ]);
-
-        let [system_view, process_view] = vertical.areas(frame.area());
-        let [process_view, process_details] = horizontal.areas(process_view);
-    
-        let mut state = self.list_state.clone();
-
-        frame.render_widget(self.cpu_chart(), system_view);
-        //frame.render_widget(self.player_list(), process_view);
-        frame.render_stateful_widget(self.player_list(), process_view, &mut state);
     }
 
     fn list_state_next(&mut self) {
@@ -130,16 +160,71 @@ impl App {
         self.list_state.select(Some(i));
     }
 
-    fn player_list(&mut self) -> List {
-        let player_counts = match self.get_player_counts() {
-            Ok(vec) => vec,
-            _ => vec![0,0,0]
+    fn render(&mut self, frame: &mut Frame) {
+        // Add one for RAM, 2 for top and bottom border
+        let count = self.cpu_data.cpu_count + 1 + 2;
+
+        let vertical = Layout::vertical([
+            Constraint::Length(count as u16),
+            Constraint::Fill(1)
+        ]);
+        let horizontal = Layout::horizontal([
+            Constraint::Percentage(20),
+            Constraint::Percentage(80),
+        ]);
+
+        let [system_view, process_view] = vertical.areas(frame.area());
+        let [process_view, process_details] = horizontal.areas(process_view);
+    
+        let mut state = self.list_state.clone();
+
+        frame.render_widget(self.cpu_chart(), system_view);
+        frame.render_stateful_widget(self.player_list(), process_view, &mut state);
+        frame.render_widget(self.server_details(), process_details);
+    }
+
+    fn server_details(&mut self) -> Paragraph {
+        let index = match self.list_state.selected() {
+            Some(i) => i,
+            None => 0,
+        };
+        let state = &self.server_states[index];
+
+        let mut lines: Vec<Line> = Vec::new();
+
+        let status_line: &str = match state.status {
+            false => "Status: Offline",
+            true => "Status: Online"
         };
 
+        let player_count_line = format!(
+            "Player Count: {} / {}",
+            state.player_count, state.max_players,
+        );
+
+        lines.push(Line::from(status_line));
+        lines.push(Line::from(player_count_line));
+        lines.push(Line::from("Players:"));
+        for player in &state.players {
+            lines.push(Line::from(format!("\t{}", player)));
+        }
+
+        Paragraph::new(lines)
+            .block(Block::bordered().title("Server Info"))
+    }
+
+    fn player_list(&mut self) -> List {
+        for state in &mut self.server_states {
+            match state.update() {
+                Ok(_) => (),
+                Err(_) => continue,
+            }
+        }
+
         let mut list_items: Vec<ListItem> = Vec::new();
-        for i in 0..player_counts.len() {
+        for i in 0..self.server_states.len() {
             let item: ListItem = ListItem::from(
-                format!("{} - {}", self.ips[i], player_counts[i])
+                format!("{} - {}", self.ips[i], self.server_states[i].player_count)
             );
             list_items.push(item);
         }
@@ -152,48 +237,8 @@ impl App {
             .highlight_spacing(ratatui::widgets::HighlightSpacing::Always)
     }
 
-    fn get_player_counts(&mut self) -> Result<Vec<u64>, Box<dyn Error>> {
-        let mut player_counts: Vec<u64> = Vec::new();
-        for ip in &self.ips {
-            let response = ureq::get(
-                format!("https://api.mcstatus.io/v2/status/java/{ip}")
-            )
-            .call()?
-            .body_mut()
-            .read_json::<Value>()?;
-       
-            player_counts.push(response["players"]["online"].as_u64().unwrap());
-        }
-
-        Ok(player_counts)
-    }
-
-    fn get_player_names(&mut self) -> Result<Vec<Vec<String>>, Box<dyn Error>> {
-        let mut player_names: Vec<Vec<String>> = Vec::new();
-        for ip in &self.ips {
-            let mut server_players: Vec<String> = Vec::new();
-
-            let response = ureq::get(
-                format!("https://api.mcstatus.io/v2/java/{ip}")
-            )
-            .call()?
-            .body_mut()
-            .read_json::<Value>()?;
-
-            if let Some(players) = response["players"]["list"].as_array() {
-                for player in players {
-                    server_players.push(player["name_clean"].to_string());
-                }
-            }
-            player_names.push(server_players);
-        }
-
-        Ok(player_names)
-    }
-
     fn cpu_chart(&mut self) -> BarChart {
-        let cpu_usage = self.cpu_data.get_cpu_usage();
-    
+        let cpu_usage = &self.system_stats.cpu_usages;
         let mut bars: Vec<Bar> = Vec::new();
 
         // CPU usage bars
@@ -207,8 +252,8 @@ impl App {
         }
 
         // Memory
-        let max: u64 = self.mem_data.get_total();
-        let used: u64 = self.mem_data.get_used();
+        let max: u64 = self.system_stats.max_mem;
+        let used: u64 = self.system_stats.mem_usage;
         let percent = used as f64 / max as f64;
         let used_str = self.mem_data.bytes_to_string(used);
         let max_str = self.mem_data.bytes_to_string(max);
